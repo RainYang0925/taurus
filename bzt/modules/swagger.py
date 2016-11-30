@@ -22,6 +22,7 @@ from collections import OrderedDict
 import yaml
 import yaml.constructor
 
+from bzt import TaurusConfigError
 from bzt.engine import Service
 from bzt.six import iteritems
 
@@ -34,13 +35,18 @@ class SwaggerConverterService(Service):
 
     def prepare(self):
         self.swagger_spec = self.parameters.get("spec", ValueError("'spec' parameter is required"))
-        self.converter = SwaggerConverter(self.converter)
+        self.converter = SwaggerConverter(self.swagger_spec, self.log)
+        self.engine.config.merge({'execution':  [{
+            'concurrency': 1,
+            'executor': 'jmeter',
+            'scenario': self.converter.convert_to_scenario()
+        }]})
 
     def startup(self):
         pass
 
     def check(self):
-        pass
+        return False
 
     def shutdown(self):
         pass
@@ -90,16 +96,22 @@ class OrderedDictYAMLLoader(yaml.Loader):
 
 
 class SwaggerConverter(object):
-    def __init__(self, spec_file):
+    def __init__(self, spec_file, parent_logger):
         self.spec_file = spec_file
+        self.log = parent_logger.getChild(self.__class__.__name__)
         self.spec_dict = None
 
     def _read_spec(self):
         if not os.path.exists(self.spec_file):
-            raise ValueError("File %s doesn't exist" % self.spec_file)
-        with open(self.spec_file) as fds:
-            self.spec_dict = json.load(fds, object_pairs_hook=OrderedDict)
-            # self.spec_dict = yaml.load(fds, OrderedDictYAMLLoader)
+            raise TaurusConfigError("File %s doesn't exist" % self.spec_file)
+        if self.spec_file.endswith('.json'):
+            with open(self.spec_file) as fds:
+                self.spec_dict = json.load(fds, object_pairs_hook=OrderedDict)
+        elif self.spec_file.endswith('.yaml') or self.spec_file.endswith('.yml'):
+            with open(self.spec_file) as fds:
+                self.spec_dict = yaml.load(fds, OrderedDictYAMLLoader)
+        else:
+            raise TaurusConfigError("Unknown file format: %s" % self.spec_file)
 
     def convert_to_scenario(self):
         """
@@ -108,16 +120,31 @@ class SwaggerConverter(object):
         """
         self._read_spec()
 
+        paths = self.spec_dict.get('paths')
+
         scenario = {}
+        base_path = None
         if self.spec_dict.get('host'):
-            scenario['default-address'] = self.spec_dict['host']
+            base_path = "http://" + self.spec_dict['host']
         if self.spec_dict.get('basePath'):
-            scenario['default-address'] += self.spec_dict['basePath']
+            base_path += self.spec_dict['basePath']
+
+        if base_path:
+            scenario['default-address'] = base_path
 
         scenario['requests'] = []
-        for path, path_info in iteritems(self.spec_dict.get('paths')):
-            request = {}
-            request['url'] = path  # TODO: handle path object 'parameters'
-            scenario['requests'].append(request)
+        for path, path_info in iteritems(paths):
+            if '{' in path and '}' in path:
+                self.log.info("Path %r is templated, skipping", path)
+                continue
+            for method, operation in iteritems(path_info):
+                if method != 'get':
+                    self.log.info("Path %r has method %r, skipping", path, method)
+                    continue
+                request = {
+                    'url': base_path + path,  # TODO: handle path object 'parameters' and templating
+                    'label': path
+                }
+                scenario['requests'].append(request)
 
         return scenario

@@ -182,6 +182,9 @@
     },
     "install-checker": {
       "class": "bzt.modules.services.InstallChecker"
+    },
+    "swagger": {
+      "class": "bzt.modules.swagger.SwaggerConverterService"
     }
   },
   "settings": {
